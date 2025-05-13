@@ -1,0 +1,76 @@
+name: Build execution environment image
+
+on:
+  push:
+    branches:
+    - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Use docker.io for Docker Hub if empty
+  REGISTRY: ghcr.io
+  # github.repository as <account>/<repo>
+  IMAGE_NAME: cloudkit-aap-ee
+
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Login against a Docker registry except on PR
+      # https://github.com/docker/login-action
+      - name: Log into registry ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=ref,event=tag
+            type=sha
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+
+      - name: Install ansible-builder
+        run: |
+          pip install ansible-builder
+
+      - name: Build execution environment image
+        run: |
+          set -e
+          ansible-builder build --tag "${IMAGE_NAME}" \
+          --build-arg ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN="$ANSIBLE_GALAXY_SERVER_AUTOMATION_HUB_TOKEN"
+
+          if [ "${GITHUB_REF#refs/heads/}" == "main" ]; then
+            docker tag  "{IMAGE_NAME}" "${REGISTRY}/${IMAGE_NAME}:latest"
+          fi
+          docker tag  "{IMAGE_NAME}" "${REGISTRY}/${IMAGE_NAME}:${GITHUB_REF#refs/heads/}"
+          docker tag  "{IMAGE_NAME}" "${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA:0:10}"
+
+      - name: Push image to registry
+        run: |
+          docker push --all-tags "${REGISTRY}/${IMAGE_NAME}"
