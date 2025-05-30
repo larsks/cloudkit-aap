@@ -1,0 +1,120 @@
+- name: Get ESI node information
+  command: >
+    openstack baremetal node show {{ esi_node_name }} -f json
+  register: esi_node_info_raw
+
+- name: Unmarshal node information
+  ansible.builtin.set_fact:
+    esi_node_info: "{{ esi_node_info_raw.stdout|from_json }}"
+
+- name: Get list of existing agents
+  kubernetes.core.k8s_info:
+    kind: Agent
+    api_version: agent-install.openshift.io/v1beta1
+    namespace: "{{ esi_agent_namespace }}"
+  register: esi_initial_agents
+
+- name: Get MAC addresses of node
+  ansible.builtin.command: >
+    openstack baremetal port list --node {{ esi_node_name }} -f json
+  register: port_list_raw
+
+- name: Extract MAC addresses
+  ansible.builtin.set_fact:
+    esi_node_addresses: >-
+      {{ (port_list_raw.stdout|from_json) | map(attribute="Address") }}
+
+- name: Import agent
+  when: not esi_node_addresses|massopencloud.esi.match_agent_addresses(esi_initial_agents.resources)
+  block:
+
+  - name: Get InfraEnv information
+    kubernetes.core.k8s_info:
+      kind: InfraEnv
+      api_version: agent-install.openshift.io/v1beta1
+      namespace: "{{ esi_agent_namespace }}"
+      name: "{{ esi_infraenv_name }}"
+    register: esi_infraenv
+
+  - name: Set esi_discovery_url
+    ansible.builtin.set_fact:
+      esi_discovery_url: "{{ esi_infraenv.resources[0].status.isoDownloadURL }}"
+    when: not esi_discovery_url|default(false)
+
+  - name: Detach all networks from node
+    ansible.builtin.command: >
+      openstack esi node network detach --all {{ esi_node_name }}
+    register: detach_cmd
+    failed_when: detach_cmd.rc != 0 and "is not associated with any port" not in detach_cmd.stderr
+
+  - name: Attach node to provisioning network
+    ansible.builtin.command: >
+      openstack esi node network attach --network {{ esi_provisioning_network_name }} {{ esi_node_name }}
+
+  - name: Set deploy interface and boot image url
+    ansible.builtin.command: >
+      openstack baremetal node set {{ esi_node_name }}
+        --instance-info deploy_interface=ramdisk
+        --instance-info boot_iso="{{ esi_discovery_url }}"
+
+  - name: Deploy node
+    ansible.builtin.command: >
+      openstack baremetal node deploy {{ esi_node_name }}
+
+- name: Wait for node to register as an agent
+  kubernetes.core.k8s_info:
+    kind: Agent
+    api_version: agent-install.openshift.io/v1beta1
+    namespace: "{{ esi_agent_namespace }}"
+  register: esi_final_agents
+  until: >
+    esi_node_addresses|massopencloud.esi.match_agent_addresses(esi_final_agents.resources)
+  retries: 90
+  delay: 10
+
+- ansible.builtin.set_fact:
+    esi_agent_name: >-
+      {{ esi_node_addresses|massopencloud.esi.match_agent_addresses(esi_final_agents.resources) }}
+
+- ansible.builtin.debug:
+    msg: "Imported {{ esi_node_name }} as agent {{ esi_agent_name }}"
+
+- name: Set agent annotations
+  ansible.builtin.set_fact:
+    esi_agent_annotations: >-
+      {{
+        { esi_node_uuid_annotation: esi_node_info.uuid }
+      }}
+
+- name: Extract topology from node name
+  ansible.builtin.set_fact:
+    esi_agent_topology: >-
+      {{ esi_node_name | massopencloud.esi.extract_esi_location }}
+
+- name: Create topology labels
+  ansible.builtin.set_fact:
+    esi_agent_topology_labels: |-
+      {% filter from_yaml %}
+      {% for label, val in esi_agent_topology.items() %}
+        {{ esi_agent_topology_label_namespace }}/{{ label }}: "{{ val }}"
+      {% endfor %}
+      {% endfilter %}
+
+- name: Create resource class label
+  ansible.builtin.set_fact:
+    esi_agent_resource_class:
+      esi.nerc.mghpcc.org/resource_class: "{{ esi_node_info.resource_class }}"
+
+- name: Configure agent metadata from ESI metadata
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: agent-install.openshift.io/v1beta1
+      kind: Agent
+      metadata:
+        name: "{{ esi_agent_name }}"
+        namespace: "{{ esi_agent_namespace }}"
+        annotations: "{{ esi_agent_annotations }}"
+        labels: "{{ esi_agent_topology_labels|combine(esi_agent_resource_class) }}"
+      spec:
+        hostname: "{{ esi_node_name|lower }}"

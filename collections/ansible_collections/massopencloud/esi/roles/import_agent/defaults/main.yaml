@@ -1,0 +1,5 @@
+esi_provisioning_network_name: provisioning
+esi_node_uuid_annotation: esi.nerc.mghpcc.org/uuid
+esi_agent_topology_label_namespace: topology.nerc.mghpcc.org
+esi_agent_namespace: hardware-inventory
+esi_infraenv_name: hardware-inventory

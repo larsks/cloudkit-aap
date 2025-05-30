@@ -1,0 +1,43 @@
+- name: Get ESI node information
+  command: >
+    openstack baremetal node show {{ esi_node_name }} -f json
+  register: esi_node_info_raw
+
+- name: Unmarshal node information
+  ansible.builtin.set_fact:
+    esi_node_info: "{{ esi_node_info_raw.stdout|from_json }}"
+
+- name: Get list of existing agents
+  kubernetes.core.k8s_info:
+    kind: Agent
+    api_version: agent-install.openshift.io/v1beta1
+    namespace: "{{ esi_agent_namespace }}"
+  register: esi_initial_agents
+
+- name: Find matching agent
+  ansible.builtin.set_fact:
+    esi_agent: >-
+      {{
+        esi_initial_agents.resources|selectattr("spec.hostname", "equalto", esi_node_name) | first
+      }}
+
+- name: Delete agent
+  kubernetes.core.k8s:
+    kind: Agent
+    api_version: agent-install.openshift.io/v1beta1
+    namespace: "{{ esi_agent_namespace }}"
+    name: "{{ esi_agent.metadata.name }}"
+    state: absent
+
+- name: Clean node
+  when: esi_node_info.provision_state == "active"
+  ansible.builtin.command: >
+    openstack baremetal node undeploy {{ esi_node_name }}
+
+- name: Wait for node to become available
+  command: >
+    openstack baremetal node show {{ esi_node_name }} -f json
+  register: esi_node_info_raw
+  until: (esi_node_info_raw.stdout|from_json).provision_state == "available"
+  retries: 300
+  delay: 10
