@@ -18,7 +18,7 @@
       condition: event.meta.endpoint == "delete-hosted-cluster"
       action:
         run_job_template:
-          name: "{{ job_template_prefix }}-delete-hosted-cluster"
+          name: "{{ job_template_prefix }}-delete-hosted-cluster-workflow"
           organization: "{{ job_template_organization }}"
 
     - name: Create virtual machine
